@@ -5,11 +5,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     # API
-    api_key: str = "secret-api-key"
+    api_key: str
 
     # PostgreSQL
     postgres_user: str = "postgres"
-    postgres_password: str = "postgres"
+    postgres_password: str
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_db: str = "payments"
