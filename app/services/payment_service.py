@@ -1,6 +1,8 @@
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.outbox import OutboxEvent
@@ -29,8 +31,9 @@ class PaymentService:
             currency=data.currency.value,
             description=data.description,
             metadata_=data.metadata,
-            status="pending",
+            status=PaymentStatus.PENDING.value,
             webhook_url=str(data.webhook_url),
+            created_at=datetime.now(timezone.utc),
         )
 
         outbox_event = OutboxEvent(
@@ -42,7 +45,17 @@ class PaymentService:
         # Atomic: both payment and outbox event in one transaction
         self.session.add(payment)
         self.session.add(outbox_event)
-        await self.session.commit()
+        try:
+            await self.session.commit()
+        except IntegrityError:
+            # Race condition: another request with same idempotency_key committed first
+            await self.session.rollback()
+            existing = await self._get_by_idempotency_key(idempotency_key)
+            return PaymentCreateResponse(
+                payment_id=existing.id,
+                status=PaymentStatus(existing.status),
+                created_at=existing.created_at,
+            )
 
         return PaymentCreateResponse(
             payment_id=payment.id,

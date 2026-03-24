@@ -29,6 +29,7 @@ async def publish_pending_events(exchange: aio_pika.abc.AbstractExchange) -> Non
             result = await session.execute(
                 select(OutboxEvent)
                 .where(OutboxEvent.published_at.is_(None))
+                .order_by(OutboxEvent.created_at)
                 .with_for_update(skip_locked=True)
                 .limit(100)
             )

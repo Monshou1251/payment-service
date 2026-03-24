@@ -10,10 +10,8 @@ Flow per message:
   6. Ack message on success
 
 Retry / DLQ:
-  On any unhandled exception the message is nacked without requeue → routed
-  to payments.dlx → payments.dead (DLQ) via RabbitMQ dead-letter config.
-  Consumer-level retry (3 attempts, exponential backoff) is applied before
-  giving up and nacking.
+  Consumer retries up to MAX_RETRIES times with exponential backoff (1s, 2s).
+  After all attempts fail — nack without requeue → DLX → payments.dead (DLQ).
 """
 import asyncio
 import json
@@ -25,7 +23,6 @@ from datetime import datetime, timezone
 import aio_pika
 from sqlalchemy import select
 
-from app.core.config import settings
 from app.core.database import AsyncSessionFactory
 from app.models.payment import Payment
 from app.outbox.rabbit import PAYMENTS_QUEUE, declare_topology, get_rabbit_connection
@@ -58,14 +55,20 @@ async def process_message(body: bytes) -> None:
         processed_at = datetime.now(timezone.utc)
         payment.status = "succeeded" if succeeded else "failed"
         payment.processed_at = processed_at
+
+        # Extract values before session closes to avoid detached object access
+        webhook_url = payment.webhook_url
+        payment_id_str = str(payment.id)
+        status = payment.status
+
         await session.commit()
-        logger.info("Payment %s → %s", payment_id, payment.status)
+        logger.info("Payment %s → %s", payment_id, status)
 
     await send_webhook(
-        webhook_url=payment.webhook_url,
+        webhook_url=webhook_url,
         payload={
-            "payment_id": str(payment.id),
-            "status": payment.status,
+            "payment_id": payment_id_str,
+            "status": status,
             "processed_at": processed_at.isoformat(),
         },
     )
@@ -73,28 +76,27 @@ async def process_message(body: bytes) -> None:
 
 async def handle_message(message: aio_pika.abc.AbstractIncomingMessage) -> None:
     """Consume one message with retry logic. Nack → DLQ after MAX_RETRIES failures."""
-    async with message.process(ignore_processed=True):
-        last_exc: Exception | None = None
+    last_exc: Exception | None = None
 
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                await process_message(message.body)
-                await message.ack()
-                return
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(
-                    "Processing attempt %d/%d failed for message %s: %s",
-                    attempt, MAX_RETRIES, message.message_id, exc,
-                )
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(2 ** (attempt - 1))  # 1s, 2s
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            await process_message(message.body)
+            await message.ack()
+            return
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "Processing attempt %d/%d failed for message %s: %s",
+                attempt, MAX_RETRIES, message.message_id, exc,
+            )
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(2 ** (attempt - 1))  # 1s, 2s before retry
 
-        logger.error(
-            "Message %s failed after %d attempts, sending to DLQ: %s",
-            message.message_id, MAX_RETRIES, last_exc,
-        )
-        await message.nack(requeue=False)  # → payments.dlx → payments.dead
+    logger.error(
+        "Message %s failed after %d attempts, sending to DLQ: %s",
+        message.message_id, MAX_RETRIES, last_exc,
+    )
+    await message.nack(requeue=False)  # → payments.dlx → payments.dead
 
 
 async def run() -> None:
