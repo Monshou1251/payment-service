@@ -56,7 +56,7 @@ POST /api/v1/payments
 ### 1. Клонировать репозиторий
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/Monshou1251/payment-service.git
 cd payment-service
 ```
 
